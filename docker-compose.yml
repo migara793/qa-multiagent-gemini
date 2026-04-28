@@ -1,0 +1,224 @@
+version: '3.8'
+
+# QA Multi-Agent System - MVP Docker Compose
+# Reference: https://docs.docker.com/compose/
+
+services:
+  # ============================================================================
+  # INFRASTRUCTURE SERVICES
+  # ============================================================================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: qa-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-qa_multiagent}
+      POSTGRES_USER: ${POSTGRES_USER:-qauser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qapassword123}
+    ports:
+      - "${POSTGRES_EXTERNAL_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - qa-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-qauser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: qa-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispassword123}
+    ports:
+      - "${REDIS_EXTERNAL_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - qa-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: qa-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-qarabbit}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-rabbitpassword123}
+    ports:
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI
+    networks:
+      - qa-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================================
+  # CORE RUNNER SERVICE
+  # ============================================================================
+
+  runner:
+    build:
+      context: .
+      dockerfile: ./runner/Dockerfile
+    container_name: qa-runner
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-exp}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-qa_multiagent}
+      - POSTGRES_USER=${POSTGRES_USER:-qauser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-qapassword123}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword123}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-qarabbit}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-rabbitpassword123}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - MIN_CODE_COVERAGE=${MIN_CODE_COVERAGE:-80.0}
+      - MAX_FAILED_TESTS=${MAX_FAILED_TESTS:-0}
+      - MAX_CRITICAL_VULNERABILITIES=${MAX_CRITICAL_VULNERABILITIES:-0}
+      - MIN_PASS_RATE=${MIN_PASS_RATE:-95.0}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-false}
+    ports:
+      - "${RUNNER_PORT:-8080}:8000"
+    volumes:
+      - ./runner:/app/runner
+      - ./shared:/app/shared
+      - test-results:/app/results
+      - reports:/app/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      test-strategy-server:
+        condition: service_started
+    networks:
+      - qa-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # MCP SERVERS (MVP - Only Test Strategy)
+  # ============================================================================
+
+  test-strategy-server:
+    build:
+      context: .
+      dockerfile: ./mcp-servers/test-strategy-server/Dockerfile
+    container_name: mcp-test-strategy
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-exp}
+      - MCP_PORT=3005
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "3005:3005"
+    volumes:
+      - ./mcp-servers/test-strategy-server:/app
+      - ./shared:/app/shared
+    networks:
+      - qa-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # CODE ANALYZER SERVICE (Token Optimization)
+  # ============================================================================
+
+  code-analyzer:
+    build:
+      context: ./services/code-analyzer
+      dockerfile: Dockerfile
+    container_name: qa-code-analyzer
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8001
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount your repository for analysis (read-only)
+      - .:/repos:ro
+      # Mount additional git repos for testing
+      - /home/migara/Desktop/online-marketplace-store:/git-repos/online-marketplace-store:ro
+      - /home/migara/Desktop/online-store:/git-repos/online-store:ro
+      - ./services/code-analyzer:/app
+    networks:
+      - qa-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================================================
+  # TEST AGENTS (MVP - Only Unit Test Agent)
+  # ============================================================================
+
+  unit-test-agent:
+    build:
+      context: .
+      dockerfile: ./agents/unit-test-agent/Dockerfile
+    container_name: qa-unit-test-agent
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword123}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-qarabbit}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-rabbitpassword123}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./agents/unit-test-agent:/app
+      - ./shared:/app/shared
+      - test-results:/app/results
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - qa-network
+    restart: unless-stopped
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+
+networks:
+  qa-network:
+    driver: bridge
+    name: qa-network
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+
+volumes:
+  postgres-data:
+    name: qa-postgres-data
+  redis-data:
+    name: qa-redis-data
+  test-results:
+    name: qa-test-results
+  reports:
+    name: qa-reports

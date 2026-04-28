@@ -1,0 +1,16 @@
+# Production-Grade Code Analyzer Requirements
+
+# FastAPI and server dependencies
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+
+# Git operations via libgit2 bindings (replaces subprocess)
+pygit2==1.13.3
+
+# Multi-language AST parsing
+tree-sitter==0.20.4
+
+# Logging and utilities
+python-dateutil==2.8.2
