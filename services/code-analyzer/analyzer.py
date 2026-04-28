@@ -312,6 +312,17 @@ class CodeAnalyzer:
                 return lang
         return 'unknown'
 
+    def _parse_numstat_line(self, output: str) -> Dict[str, int]:
+        """Parse numstat output — find the data line (skips commit header lines)"""
+        for line in output.split('\n'):
+            parts = line.strip().split('\t')
+            if len(parts) == 3 and parts[0] != '-' and parts[1] != '-':
+                try:
+                    return {'added': int(parts[0]), 'removed': int(parts[1])}
+                except ValueError:
+                    continue
+        return {'added': 0, 'removed': 0}
+
     def _get_file_diff_stats(self, file_path: str, commit_ref: str) -> Dict[str, int]:
         """Get line addition/deletion stats for file"""
         cmd = [
@@ -319,13 +330,8 @@ class CodeAnalyzer:
             '--numstat', commit_ref, '--', file_path
         ]
         try:
-            output = subprocess.check_output(cmd, text=True).strip()
-            if output:
-                parts = output.split('\t')
-                return {
-                    'added': int(parts[0]) if parts[0] != '-' else 0,
-                    'removed': int(parts[1]) if parts[1] != '-' else 0
-                }
+            output = subprocess.check_output(cmd, text=True)
+            return self._parse_numstat_line(output)
         except:
             pass
         return {'added': 0, 'removed': 0}
@@ -337,114 +343,177 @@ class CodeAnalyzer:
             '--numstat', f"{base_ref}...{head_ref}", '--', file_path
         ]
         try:
-            output = subprocess.check_output(cmd, text=True).strip()
-            if output:
-                parts = output.split('\t')
-                return {
-                    'added': int(parts[0]) if parts[0] != '-' else 0,
-                    'removed': int(parts[1]) if parts[1] != '-' else 0
-                }
+            output = subprocess.check_output(cmd, text=True)
+            return self._parse_numstat_line(output)
         except:
             pass
         return {'added': 0, 'removed': 0}
 
+    # JS/TS function definition patterns
+    JS_FUNCTION_PATTERNS = [
+        r'function\s+(\w+)\s*\(',                        # function foo(
+        r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function', # const foo = function
+        r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(', # const foo = async (
+        r'(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{',         # foo() {
+        r'app\.(?:get|post|put|delete|patch)\s*\([\'\"](.*?)[\'\"]', # express routes
+    ]
+
+    JS_CLASS_PATTERNS = [
+        r'class\s+(\w+)',                                # class Foo
+    ]
+
     def _get_changed_symbols(self, file_path: str, commit_ref: str, language: str) -> Tuple[List[str], List[str]]:
         """Extract changed function and class names"""
-        if language != 'python':
-            return [], []
+        if language == 'python':
+            return self._get_python_symbols_commit(file_path, commit_ref)
+        elif language in ('javascript', 'typescript'):
+            return self._get_js_symbols_commit(file_path, commit_ref)
+        return [], []
 
+    def _get_python_symbols_commit(self, file_path: str, commit_ref: str) -> Tuple[List[str], List[str]]:
+        """Extract changed Python symbols from a commit"""
         try:
-            # Get the diff with function names
             cmd = [
                 'git', '-C', str(self.repo_path), 'show',
                 '-U0', '--function-context', commit_ref, '--', file_path
             ]
             diff_output = subprocess.check_output(cmd, text=True)
-
-            functions = set()
-            classes = set()
-
-            # Parse diff to find changed symbols
-            for line in diff_output.split('\n'):
-                if line.startswith('@@'):
-                    # Extract function/class name from diff hunk header
-                    match = re.search(r'@@.*@@\s+(.*)', line)
-                    if match:
-                        symbol = match.group(1).strip()
-                        if symbol.startswith('def '):
-                            func_name = symbol.split('(')[0].replace('def ', '')
-                            functions.add(func_name)
-                        elif symbol.startswith('class '):
-                            class_name = symbol.split('(')[0].split(':')[0].replace('class ', '')
-                            classes.add(class_name)
-
-            return list(functions), list(classes)
+            return self._parse_python_symbols(diff_output)
         except:
             return [], []
 
-    def _get_changed_symbols_range(self, file_path: str, base_ref: str, head_ref: str, language: str) -> Tuple[List[str], List[str]]:
-        """Extract changed symbols in diff range"""
-        if language != 'python':
+    def _get_js_symbols_commit(self, file_path: str, commit_ref: str) -> Tuple[List[str], List[str]]:
+        """Extract changed JS/TS symbols from a commit diff"""
+        try:
+            cmd = [
+                'git', '-C', str(self.repo_path), 'show',
+                commit_ref, '--', file_path
+            ]
+            diff_output = subprocess.check_output(cmd, text=True)
+            return self._parse_js_symbols(diff_output)
+        except:
             return [], []
 
+    def _parse_python_symbols(self, diff_output: str) -> Tuple[List[str], List[str]]:
+        """Parse Python function/class names from diff hunk headers"""
+        functions = set()
+        classes = set()
+        for line in diff_output.split('\n'):
+            if line.startswith('@@'):
+                match = re.search(r'@@.*@@\s+(.*)', line)
+                if match:
+                    symbol = match.group(1).strip()
+                    if symbol.startswith('def '):
+                        functions.add(symbol.split('(')[0].replace('def ', '').strip())
+                    elif symbol.startswith('class '):
+                        classes.add(symbol.split('(')[0].split(':')[0].replace('class ', '').strip())
+        return list(functions), list(classes)
+
+    def _parse_js_symbols(self, diff_output: str) -> Tuple[List[str], List[str]]:
+        """Parse JS/TS function/class names from added/modified diff lines"""
+        functions = set()
+        classes = set()
+        for line in diff_output.split('\n'):
+            if not line.startswith('+') or line.startswith('+++'):
+                continue
+            content = line[1:]
+            for pattern in self.JS_FUNCTION_PATTERNS:
+                match = re.search(pattern, content)
+                if match:
+                    functions.add(match.group(1))
+                    break
+            for pattern in self.JS_CLASS_PATTERNS:
+                match = re.search(pattern, content)
+                if match:
+                    classes.add(match.group(1))
+        return list(functions), list(classes)
+
+    def _get_changed_symbols_range(self, file_path: str, base_ref: str, head_ref: str, language: str) -> Tuple[List[str], List[str]]:
+        """Extract changed symbols in diff range"""
+        if language == 'python':
+            return self._get_python_symbols_range(file_path, base_ref, head_ref)
+        elif language in ('javascript', 'typescript'):
+            return self._get_js_symbols_range(file_path, base_ref, head_ref)
+        return [], []
+
+    def _get_python_symbols_range(self, file_path: str, base_ref: str, head_ref: str) -> Tuple[List[str], List[str]]:
+        """Extract Python symbols from diff range"""
         try:
             cmd = [
                 'git', '-C', str(self.repo_path), 'diff',
                 '-U0', '--function-context', f"{base_ref}...{head_ref}", '--', file_path
             ]
             diff_output = subprocess.check_output(cmd, text=True)
+            return self._parse_python_symbols(diff_output)
+        except:
+            return [], []
 
-            functions = set()
-            classes = set()
-
-            for line in diff_output.split('\n'):
-                if line.startswith('@@'):
-                    match = re.search(r'@@.*@@\s+(.*)', line)
-                    if match:
-                        symbol = match.group(1).strip()
-                        if symbol.startswith('def '):
-                            func_name = symbol.split('(')[0].replace('def ', '')
-                            functions.add(func_name)
-                        elif symbol.startswith('class '):
-                            class_name = symbol.split('(')[0].split(':')[0].replace('class ', '')
-                            classes.add(class_name)
-
-            return list(functions), list(classes)
+    def _get_js_symbols_range(self, file_path: str, base_ref: str, head_ref: str) -> Tuple[List[str], List[str]]:
+        """Extract JS/TS symbols from diff range"""
+        try:
+            cmd = [
+                'git', '-C', str(self.repo_path), 'diff',
+                f"{base_ref}...{head_ref}", '--', file_path
+            ]
+            diff_output = subprocess.check_output(cmd, text=True)
+            return self._parse_js_symbols(diff_output)
         except:
             return [], []
 
     def _calculate_complexity_delta(self, file_path: str, commit_ref: str, language: str) -> int:
         """Calculate change in cyclomatic complexity"""
-        if language != 'python':
-            return 0
-
         try:
-            # Get before and after versions
             before_content = self._get_file_at_commit(file_path, f"{commit_ref}^")
             after_content = self._get_file_at_commit(file_path, commit_ref)
-
-            before_complexity = self._calculate_python_complexity(before_content)
-            after_complexity = self._calculate_python_complexity(after_content)
-
-            return after_complexity - before_complexity
+            return self._complexity(after_content, language) - self._complexity(before_content, language)
         except:
             return 0
 
     def _calculate_complexity_delta_range(self, file_path: str, base_ref: str, head_ref: str, language: str) -> int:
         """Calculate complexity delta for range"""
-        if language != 'python':
-            return 0
-
         try:
             before_content = self._get_file_at_commit(file_path, base_ref)
             after_content = self._get_file_at_commit(file_path, head_ref)
-
-            before_complexity = self._calculate_python_complexity(before_content)
-            after_complexity = self._calculate_python_complexity(after_content)
-
-            return after_complexity - before_complexity
+            return self._complexity(after_content, language) - self._complexity(before_content, language)
         except:
             return 0
+
+    def _complexity(self, code: str, language: str) -> int:
+        """Route complexity calculation by language"""
+        if language == 'python':
+            return self._calculate_python_complexity(code)
+        elif language in ('javascript', 'typescript'):
+            return self._calculate_js_complexity(code)
+        return 0
+
+    def _calculate_js_complexity(self, code: str) -> int:
+        """Calculate cyclomatic complexity for JS/TS code.
+        Counts every decision point: if, else if, for, while, case, catch, &&, ||, ternary ?
+        """
+        if not code:
+            return 0
+        complexity = 1  # base
+        # Remove strings and comments to avoid false matches
+        code = re.sub(r'//.*', '', code)
+        code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
+        code = re.sub(r'"[^"]*"', '""', code)
+        code = re.sub(r"'[^']*'", "''", code)
+        code = re.sub(r'`[^`]*`', '``', code)
+
+        decision_patterns = [
+            r'\bif\b',
+            r'\belse\s+if\b',
+            r'\bfor\b',
+            r'\bwhile\b',
+            r'\bcase\b',
+            r'\bcatch\b',
+            r'\?\s*\w',   # ternary operator
+            r'&&',
+            r'\|\|',
+        ]
+        for pattern in decision_patterns:
+            complexity += len(re.findall(pattern, code))
+        return complexity
 
     def _get_file_at_commit(self, file_path: str, commit_ref: str) -> str:
         """Get file content at specific commit"""
