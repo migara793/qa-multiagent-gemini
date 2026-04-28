@@ -28,10 +28,10 @@ A production-ready **Quality Assurance (QA) system** for automated software test
 │                   ORCHESTRATOR AGENT (LlmAgent)                          │
 │           Analyzes code changes & orchestrates test strategy             │
 │                                                                           │
-│  MCP Toolsets:                                                           │
-│  • git-server - Code diff analysis, change detection                     │
-│  • code-analyzer-server - AST parsing, complexity analysis               │
-│  • test-strategy-server - Test plan generation                           │
+│  Tools:                                                                   │
+│  • code-analyzer (REST :8001) - Git diff extraction, token optimization  │
+│    NOT an MCP server — called via HTTP POST before Gemini receives data  │
+│  • test-strategy-server (MCP :3005) - AI test plan generation (Gemini)  │
 └────────────────────────────────┬────────────────────────────────────────┘
                                  │
                                  ▼

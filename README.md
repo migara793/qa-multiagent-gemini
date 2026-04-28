@@ -7,7 +7,8 @@ A production-ready Quality Assurance system using Google ADK, Gemini AI, and Mod
 - **Multi-Agent Architecture**: 10+ specialized AI agents working in parallel
 - **Comprehensive Testing**: Unit, Integration, E2E, Performance, Security testing
 - **AI-Powered**: Gemini AI for intelligent test generation and bug detection
-- **MCP Integration**: Standardized protocol for tool integration
+- **MCP Integration**: Standardized protocol for AI tool integration (test-strategy-server)
+- **Code Change Extraction**: Dedicated REST microservice (`code-analyzer`) pre-processes git diffs to reduce AI token usage by ~70%
 - **Docker Compose**: Easy deployment with microservices
 - **Real-time Monitoring**: Prometheus & Grafana dashboards
 - **Quality Gates**: Automated pass/fail decisions
@@ -71,9 +72,13 @@ chmod +x scripts/*.sh
 
 ```
 Developer Push → GitHub Webhook → Runner → Orchestrator Agent
+  → code-analyzer (REST) → structured summary → Gemini AI (MCP)
   → Parallel Test Agents (6) → Sequential Analysis (3)
   → Quality Gate → GitHub Status Update
 ```
+
+> **Note on code-analyzer:** This is a direct HTTP REST microservice (port 8001), not an MCP server.
+> It extracts structured change data from git commits before sending to Gemini, keeping AI token usage minimal.
 
 ## 🧪 Testing the System
 
@@ -92,9 +97,11 @@ docker compose logs -f test-strategy-server
 
 ```
 qa-multiagent-gemini/
-├── runner/                 # Main orchestrator service
-├── agents/                 # Test agent services
-├── mcp-servers/           # MCP server implementations
+├── runner/                 # Main orchestrator service (FastAPI, port 8080)
+├── agents/                 # Test agent services (10 agents)
+├── mcp-servers/           # MCP server implementations (test-strategy-server, port 3005)
+├── services/
+│   └── code-analyzer/     # REST microservice — git diff extraction & token optimization (port 8001)
 ├── infrastructure/        # Database, monitoring configs
 ├── shared/                # Shared libraries
 ├── scripts/               # Utility scripts
