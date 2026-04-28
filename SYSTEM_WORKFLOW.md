@@ -4,6 +4,20 @@
 
 This document explains the **complete end-to-end workflow** of the QA Multi-Agent System from the moment a developer pushes code to the repository until the final quality gate decision.
 
+### Key Design Decision: Token Optimization via code-analyzer
+
+The `code-analyzer` microservice exists specifically to **reduce AI token consumption**.
+
+Instead of sending raw git diffs and full file contents directly to Gemini (which can be thousands of tokens per file), the code-analyzer pre-processes the repository changes into a compact structured summary — only the essential facts (files changed, functions modified, risk score, affected modules) reach the AI. This keeps Gemini prompts lean and costs low regardless of how large the actual code change is.
+
+```
+WITHOUT code-analyzer (high token cost):
+  Raw diff → Gemini  ❌ 10,000+ tokens per PR
+
+WITH code-analyzer (optimized):
+  Raw diff → code-analyzer → structured summary → Gemini  ✅ ~200 tokens per PR
+```
+
 ---
 
 ## Table of Contents
@@ -398,8 +412,10 @@ async def _analyze_and_strategize(self, state: Dict[str, Any]):
     # }
 
     # Step 3: Extract code changes via REST API (code-analyzer microservice)
-    # NOTE: code-analyzer is a direct HTTP REST microservice, NOT an MCP server.
-    # It is called via HTTP POST to http://code-analyzer:8001 — not via MCP protocol.
+    # WHY REST and not MCP: code-analyzer is a pre-processing layer whose sole job is
+    # to reduce AI token usage. Raw diffs can be 10,000+ tokens; the structured summary
+    # output is ~200 tokens. Only the summary is ever sent to Gemini, keeping costs low.
+    # It is a direct HTTP REST microservice, NOT an MCP server.
     code_analysis = await self.http_client.post(
         "http://code-analyzer:8001/analyze/commit",
         json={
@@ -1308,7 +1324,7 @@ The system provides **comprehensive, automated QA** that:
 |---------|------|----------|------|---------|
 | `runner` | Core | HTTP REST | 8080 | Pipeline trigger & orchestration |
 | `test-strategy-server` | MCP Server | MCP over HTTP | 3005 | AI test strategy generation (Gemini) |
-| `code-analyzer` | REST Microservice | HTTP REST | 8001 | Code change extraction from git commits |
+| `code-analyzer` | REST Microservice | HTTP REST | 8001 | Code change extraction — pre-processes diffs to reduce AI token usage |
 | `postgres` | Infrastructure | TCP | 5433 | Execution state persistence |
 | `redis` | Infrastructure | TCP | 6380 | Shared agent state |
 | `rabbitmq` | Infrastructure | AMQP | 5672 | Agent task queue |
@@ -1316,3 +1332,8 @@ The system provides **comprehensive, automated QA** that:
 > **Important:** `code-analyzer` is a **direct REST API microservice**, not an MCP server.
 > It is called with standard HTTP POST requests — not via the MCP protocol.
 > Use `/analyze/commit` for single commits and `/analyze/diff` for PR branch comparisons.
+>
+> **Why not MCP?** The code-analyzer is a token optimization layer — it converts large raw diffs
+> into compact structured summaries before they reach Gemini. There is no reason to route this
+> through MCP since the AI never calls it directly; the orchestrator calls it first, then feeds
+> the small structured output into the AI prompt.
