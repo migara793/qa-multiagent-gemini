@@ -44,7 +44,7 @@ This document explains the **complete end-to-end workflow** of the QA Multi-Agen
 │                                                                       │
 │  Step 1: Fetch code changes from GitHub                             │
 │  Step 2: Analyze diff (MCP: git-server)                             │
-│  Step 3: Parse AST & complexity (MCP: code-analyzer-server)         │
+│  Step 3: Extract code changes (REST API: code-analyzer :8001)       │
 │  Step 4: Generate test strategy (MCP: test-strategy-server + Gemini)│
 │                                                                       │
 │  Output: Test strategy → which tests to run, priority, resources    │
@@ -397,25 +397,46 @@ async def _analyze_and_strategize(self, state: Dict[str, Any]):
     #   "diff_content": "diff --git a/src/api/users.ts..."
     # }
 
-    # Step 3: Parse code with AST analysis
-    code_analysis = await self.mcp_clients["code-analyzer"].call_tool(
-        "analyze_complexity",
-        {
-            "files": git_diff["changed_files"],
-            "repo_path": repo_path
+    # Step 3: Extract code changes via REST API (code-analyzer microservice)
+    # NOTE: code-analyzer is a direct HTTP REST microservice, NOT an MCP server.
+    # It is called via HTTP POST to http://code-analyzer:8001 — not via MCP protocol.
+    code_analysis = await self.http_client.post(
+        "http://code-analyzer:8001/analyze/commit",
+        json={
+            "repo_path": repo_path,
+            "commit_ref": state["commit_sha"]
         }
     )
     # Output:
     # {
-    #   "complexity": {
-    #     "cyclomatic": 12,
-    #     "cognitive": 8,
-    #     "maintainability_index": 65
-    #   },
-    #   "dependencies": ["express", "jsonwebtoken", "bcrypt"],
-    #   "functions": ["createUser", "updateUser", "deleteUser"],
-    #   "risk_level": "medium"
+    #   "success": true,
+    #   "data": {
+    #     "commit_sha": "a1b2c3d4...",
+    #     "commit_message": "Add user management API",
+    #     "author": "john_doe",
+    #     "files_changed": [
+    #       {
+    #         "file_path": "src/api/users.ts",
+    #         "change_type": "added",
+    #         "lines_added": 150,
+    #         "lines_removed": 0,
+    #         "language": "typescript",
+    #         "functions_changed": ["createUser", "updateUser"],
+    #         "complexity_delta": 8
+    #       }
+    #     ],
+    #     "total_lines_added": 150,
+    #     "total_lines_removed": 20,
+    #     "risk_score": 7.0,
+    #     "affected_modules": ["api"],
+    #     "test_files_modified": false,
+    #     "suggested_test_areas": ["Integration tests for api module"]
+    #   }
     # }
+    #
+    # For PR diff analysis (base branch → PR head), use /analyze/diff:
+    # POST http://code-analyzer:8001/analyze/diff
+    # { "repo_path": ..., "base_ref": "main", "head_ref": "HEAD" }
 
     # Step 4: Generate test strategy using Gemini AI
     strategy_prompt = f"""
@@ -1217,10 +1238,14 @@ export async function createUser(req, res) {
 
 ### System Response:
 
-**1. Code Analysis (Gemini):**
-- Detects new API endpoint
-- Identifies database interaction
-- Flags missing input validation
+**1. Code Change Extraction (code-analyzer REST API → `POST /analyze/commit`):**
+- Detects new file `src/api/users.ts` was added
+- Identifies functions changed: `createUser`
+- Calculates risk score: 7.0 (new backend code, no tests modified)
+- Flags `test_files_modified: false` → triggers test coverage warning
+- Suggests: integration tests for `api` module
+
+**2. Test Strategy (Gemini via test-strategy-server MCP):**
 - Recommends: unit + integration + security tests
 
 **2. Test Execution:**
@@ -1264,12 +1289,30 @@ export async function createUser(req, res) {
 The system provides **comprehensive, automated QA** that:
 
 1. ✅ **Triggers automatically** on code push/PR
-2. ✅ **Analyzes changes intelligently** using AI
-3. ✅ **Runs tests in parallel** for speed
-4. ✅ **Detects bugs proactively** using Gemini
-5. ✅ **Generates detailed reports** with visualizations
-6. ✅ **Updates GitHub automatically** with results
-7. ✅ **Blocks merges** if quality gates fail
-8. ✅ **Provides actionable recommendations**
+2. ✅ **Extracts code changes** via code-analyzer REST microservice (`POST /analyze/commit`, `/analyze/diff`)
+3. ✅ **Generates test strategy** using Gemini AI via test-strategy-server (MCP)
+4. ✅ **Runs tests in parallel** for speed
+5. ✅ **Detects bugs proactively** using Gemini
+6. ✅ **Generates detailed reports** with visualizations
+7. ✅ **Updates GitHub automatically** with results
+8. ✅ **Blocks merges** if quality gates fail
+9. ✅ **Provides actionable recommendations**
 
 **Result:** Faster feedback, higher code quality, fewer production bugs!
+
+---
+
+## Service Architecture Reference
+
+| Service | Type | Protocol | Port | Purpose |
+|---------|------|----------|------|---------|
+| `runner` | Core | HTTP REST | 8080 | Pipeline trigger & orchestration |
+| `test-strategy-server` | MCP Server | MCP over HTTP | 3005 | AI test strategy generation (Gemini) |
+| `code-analyzer` | REST Microservice | HTTP REST | 8001 | Code change extraction from git commits |
+| `postgres` | Infrastructure | TCP | 5433 | Execution state persistence |
+| `redis` | Infrastructure | TCP | 6380 | Shared agent state |
+| `rabbitmq` | Infrastructure | AMQP | 5672 | Agent task queue |
+
+> **Important:** `code-analyzer` is a **direct REST API microservice**, not an MCP server.
+> It is called with standard HTTP POST requests — not via the MCP protocol.
+> Use `/analyze/commit` for single commits and `/analyze/diff` for PR branch comparisons.
